@@ -1,0 +1,1328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Picture Matching Task</title>
+<!--
+  H010 — EXPERIMENT 3.1, ONLINE VERSION
+  Emergence of Choice by Exclusion (CBE) and Fast Mapping (FM) as a function of training
+  set size in adult humans. Kayley M. Ozimac & Aaron P. Blaisdell, Comparative Cognition Lab, UCLA.
+
+  Browser port of H010_setsize_CBE.py (Tkinter/PIL), packaged like H009 (Cup Search Task):
+  one self-contained index.html, consent sheet -> instructions -> task -> retention test ->
+  post-task survey -> debriefing, data saved to Google Drive through DataPipe.
+
+  The task logic is a line-for-line port of the Python script:
+    - 48 pairs, cumulative doubling training: phase 1 = pairs 1-3, 2 = 1-6, 3 = 1-12, 4 = 1-24, 5 = 1-48
+    - REPS_PER_PAIR presentations of each active pair per phase, bag-cycled, sides counterbalanced
+      (no more than 3 in a row), foil = correct associate of a different current sample
+    - End of phases 1-4: 8 non-reinforced CBE probes (novel sample vs NC1 and a familiar trained
+      comparison), interleaved with 16 reinforced maintenance trials. If CBE >= 6/8, 8 FM probes
+      (novel sample vs NC1 and NC2, two NC2 foils x 4 probes), interleaved the same way.
+    - Version "stop_on_fm" ends after the first phase whose FM test is passed;
+      "all_phases" runs all five phases.
+    - Retention test (drag each comparison onto its sample) for the largest set size reached.
+  Differences from the lab version (online-only additions):
+    - Participant code is a random code (not typed in), and it seeds the per-participant RNG.
+    - Attention checks (one per phase from phase 2 on, inside the training block, never next to a probe).
+    - Strategy report is question 1 of the post-task survey; demographics are collected there too,
+      so Age/Gender in the trial file are NA (they're in the _survey file).
+    - Extra trial-file columns at the end: SessionTime (s since task start) and Date.
+    - tab_hidden / tab_visible events are logged if the participant leaves the tab.
+
+  Stimuli: your own images in stimuli/ (at least 104 .png/.jpg/.jpeg), listed in stimuli/stimuli.js
+  by make_stimulus_list.py. Roles are assigned per participant, as in the Python version.
+  Folder layout for the repo:
+      index.html
+      make_stimulus_list.py
+      stimuli/
+          stimuli.js        <- written by make_stimulus_list.py
+          your images…
+  See CONFIG.stimuli below (it can also generate kaleidoscopes in the browser instead).
+
+  URL options (for piloting):
+    ?debug=1          trial info shown, correct comparison outlined, files labeled TEST_
+    ?test=1           real session, but files labeled TEST_ and a "download data" button is shown at the end
+    ?version=all_phases | stop_on_fm      override CONFIG.version
+    ?bot=0.9          (debug only) the task plays itself, 90% correct on training trials
+    &botprobe=0.5     (with bot) probability the bot picks NC1 on probe trials (default 1)
+-->
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { height: 100%; }
+  html, body {
+    min-height: 100%;
+    background: #f3f1ec;
+    color: #222;
+    font-family: Arial, Helvetica, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  body { display: flex; align-items: center; justify-content: center; }
+  body.dark { background: #000; color: #fff; }
+
+  .screen { display: none; width: 100%; max-width: 680px; padding: 24px 16px; text-align: center; }
+  .screen.active { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+
+  h1 { font-size: 1.7rem; }
+  h2 { font-size: 1.3rem; }
+  p  { font-size: 1.05rem; line-height: 1.6; }
+
+  .box {
+    background: #fff; border: 1px solid #d8d4cb; border-radius: 8px;
+    padding: 18px 22px; width: 100%; text-align: left;
+  }
+  .box p + p { margin-top: 10px; }
+
+  button {
+    padding: 12px 34px; font-size: 1.05rem; font-weight: bold;
+    background: #2f5d8a; color: #fff; border: none; border-radius: 6px; cursor: pointer;
+  }
+  button:hover { background: #244a6f; }
+  button:disabled { background: #9aa9b8; cursor: default; }
+
+  /* Placeholders that must be replaced before launch */
+  .todo { background: #ffe08a; padding: 0 3px; }
+
+  /* Consent / debrief sheets (same as H009) */
+  .sheet h3 { font-size: 1rem; margin: 20px 0 6px; letter-spacing: 0.02em; }
+  .sheet h3:first-child { margin-top: 0; }
+  .sheet h4 { font-size: 0.98rem; margin: 14px 0 4px; }
+  .sheet p, .sheet li { font-size: 0.98rem; line-height: 1.55; }
+  .sheet p + p { margin-top: 8px; }
+  .sheet ul { padding-left: 22px; margin: 6px 0; }
+  .sheet .sheet-title { text-align: center; }
+  .consent-choice label { display: block; margin: 6px 0; font-size: 1.02rem; cursor: pointer; }
+  .consent-choice input { margin-right: 8px; transform: scale(1.1); }
+  button.linklike { background: none; color: #2f5d8a; padding: 0; font-weight: normal; font-size: 0.95rem; text-decoration: underline; }
+  button.linklike:hover { background: none; color: #244a6f; }
+  @media print { button, .consent-choice { display: none !important; } body { background: #fff; } }
+
+  /* Dark screens (instructions, task, attention check, retention), black like the lab version */
+  .dark-screen { color: #fff; }
+  .dark-screen p { font-family: "Times New Roman", Times, serif; font-size: 1.35rem; line-height: 1.55; }
+  .dark-screen button { background: #3c6fa3; }
+  .dark-screen button:disabled { background: #444; color: #888; cursor: default; }
+  #load-status { font-size: 1rem !important; color: #aaa; min-height: 1.4em; }
+
+  /* Task stage: full window, positions computed in JS from the window size (as in the Python version) */
+  #screen-task.active, #screen-retention.active {
+    position: fixed; inset: 0; max-width: none; padding: 0; display: block; background: #000;
+  }
+  .stim { position: absolute; display: none; cursor: pointer; -webkit-user-drag: none; }
+  .stim.selected { outline: 4px solid yellow; outline-offset: 6px; }
+  .stim.debug-correct { box-shadow: 0 0 0 3px #d00; }
+  #fixation { position: absolute; display: none; color: #fff; font: 48px "Times New Roman", serif; transform: translate(-50%, -50%); }
+  #feedback { position: absolute; display: none; font: 30px "Times New Roman", serif; transform: translate(-50%, -50%); white-space: nowrap; }
+  #debug-info { position: absolute; left: 8px; bottom: 6px; font-size: 0.85rem; color: #f88; text-align: left; }
+
+  /* Attention check */
+  .check-options { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
+  .check-options button { min-width: 120px; }
+
+  /* Retention */
+  #ret-instr { position: absolute; left: 0; right: 0; top: 18px; text-align: center; font: 20px/1.4 "Times New Roman", serif; color: #fff; }
+  .ret-sample, .ret-tile { position: absolute; -webkit-user-drag: none; }
+  .ret-tile { cursor: grab; touch-action: none; z-index: 1; }
+  .ret-tile.dragging { cursor: grabbing; z-index: 10; }
+  .ret-box { position: absolute; border: 2px dashed #bbb; }
+  #ret-done { position: absolute; right: 40px; bottom: 24px; }
+
+  /* Survey (same as H009) */
+  input, textarea { user-select: text; -webkit-user-select: text; }
+  .survey { display: flex; flex-direction: column; gap: 26px; }
+  .q-title { font-weight: bold; font-size: 1.02rem; line-height: 1.45; margin-bottom: 8px; }
+  .q label { display: block; margin: 5px 0; font-size: 1rem; cursor: pointer; }
+  .q input[type=radio], .q input[type=checkbox] { margin-right: 8px; transform: scale(1.1); }
+  .q textarea {
+    width: 100%; min-height: 90px; padding: 8px 10px; resize: vertical;
+    font-family: inherit; font-size: 1rem; border: 1px solid #b9b4a8; border-radius: 6px;
+  }
+  .q input[type=number] { width: 120px; padding: 8px 10px; font-size: 1rem; border: 1px solid #b9b4a8; border-radius: 6px; }
+  .q input.other { width: 220px; padding: 4px 8px; margin-left: 6px; font-size: 0.95rem; border: 1px solid #b9b4a8; border-radius: 4px; }
+  #downloads { display: none; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  #downloads button { font-size: 0.9rem; padding: 8px 16px; }
+</style>
+</head>
+<body>
+
+<!-- ════════ COMPUTER REQUIRED (shown instead of consent on phones and tablets) ════════ -->
+<div id="screen-device" class="screen">
+  <h2>A computer is required</h2>
+  <div class="box">
+    <p>This study needs a laptop or desktop computer with a mouse or trackpad. Please return on a computer.</p>
+  </div>
+</div>
+
+<!-- ════════ CONSENT (Research Information Sheet) ════════
+     DRAFT adapted from the H009 sheet. Replace with the exact OHRPP-approved text for this
+     protocol before launch. Highlighted text = placeholders. -->
+<div id="screen-consent" class="screen active">
+  <h1>Picture Matching Task</h1>
+  <div class="box sheet">
+    <p class="sheet-title">University of California, Los Angeles</p>
+    <h3 class="sheet-title">RESEARCH INFORMATION SHEET</h3>
+    <p class="sheet-title"><strong><span class="todo">[IRB-approved study title]</span></strong></p>
+
+    <h3>INTRODUCTION</h3>
+    <p>The Blaisdell Lab from the UCLA Department of Psychology is conducting a research study. It is not being externally funded. You were selected as a possible participant because you are eligible to participate through the UCLA Psychology Department Subject Pool (SONA), are at least 18 years old, and have access to a computer or laptop with an internet connection. Your participation in this research study is voluntary.</p>
+
+    <h3>WHAT SHOULD I KNOW ABOUT A RESEARCH STUDY?</h3>
+    <ul>
+      <li>The information below explains this research study.</li>
+      <li>Whether or not you take part is up to you.</li>
+      <li>You can choose not to take part.</li>
+      <li>You can agree to take part and later change your mind.</li>
+      <li>Your decision will not be held against you.</li>
+      <li>You can ask questions before you decide.</li>
+    </ul>
+
+    <h3>WHY IS THIS RESEARCH BEING DONE?</h3>
+    <p>The purpose of this research is to learn more about how people learn which pictures go together, and how they make choices when they are unsure of the answer.</p>
+
+    <h3>HOW LONG WILL THE RESEARCH LAST AND WHAT WILL I NEED TO DO?</h3>
+    <p>Participation will take a total of approximately <span class="todo">[XX]</span> minutes and will occur entirely online in one session.</p>
+    <p>If you volunteer to participate in this study, you will be asked to:</p>
+    <ul>
+      <li>Read the study instructions and complete an online computer-based picture-matching game.</li>
+      <li>Match pictures together by clicking on them with your mouse or trackpad.</li>
+      <li>Complete a brief post-task survey about your experience with the task.</li>
+      <li>Complete the study using your own computer or laptop in a quiet, private location of your choosing.</li>
+    </ul>
+    <p>The task is experimental. Some details about how the task works cannot be fully explained before participation because knowing those details in advance could affect how you respond. You will receive additional information about the purpose and design of the task after you finish the study.</p>
+
+    <h3>ARE THERE ANY RISKS IF I PARTICIPATE?</h3>
+    <p>This study involves no more than minimal risk. You may experience mild boredom, fatigue, or frustration while completing the computer-based task. You may stop participating at any time.</p>
+
+    <h3>ARE THERE ANY BENEFITS IF I PARTICIPATE?</h3>
+    <p>You will not directly benefit from your participation in the research.</p>
+    <p>The results of the research may contribute to a better scientific understanding of how people learn new relationships and make choices about unfamiliar things.</p>
+
+    <h3>WHAT OTHER CHOICES DO I HAVE IF I CHOOSE NOT TO PARTICIPATE?</h3>
+    <p>You do not have to participate in this study. You may choose not to participate or may choose to participate in a different study or use any other option for earning credit offered through the UCLA Psychology Department Subject Pool (SONA).</p>
+
+    <h3>HOW WILL INFORMATION ABOUT ME AND MY PARTICIPATION BE KEPT CONFIDENTIAL?</h3>
+    <p>The researchers will do their best to make sure that your private information is kept confidential. Information about you will be handled as confidentially as possible, but participating in research may involve a loss of privacy and the potential for a breach in confidentiality. Study data will be electronically secured. As with any use of electronic means to store data, there is a risk of breach of data security.</p>
+    <h4>Use of personal information that can identify you:</h4>
+    <p>The research dataset will not contain your name, email address, or other direct identifiers. You will be represented in the research dataset by a study-specific participant code. SONA is used only to manage sign-ups and research participation credit, and your name and SONA identification number will not be recorded with your task responses.</p>
+    <h4>How information about you will be stored:</h4>
+    <p>Data from the online task will be transmitted through DataPipe and stored in an access-restricted folder in the research team’s UCLA Google Drive. Data transmitted over the internet will be encrypted during transmission using HTTPS. Access to the stored research data will be limited to authorized study personnel.</p>
+    <h4>People and agencies that will have access to your information:</h4>
+    <p>The research team and authorized UCLA personnel may have access to study data and records to monitor the study. Publications and/or presentations that result from this study will not identify you by name.</p>
+    <h4>How long information from the study will be kept:</h4>
+    <p>De-identified research data may be retained after completion of the study for future research and analysis. The retained dataset will not contain your name, email address, or other direct identifiers.</p>
+
+    <h3>USE OF DATA FOR FUTURE RESEARCH</h3>
+    <p>Your de-identified data may be kept for use in future research. De-identified data may also be shared with other researchers or posted in a public research data repository (such as OSF), for example when the results are published. These data will not include your name or other information that directly identifies you. Any future use or sharing of study data will be limited to de-identified data and will occur in accordance with applicable UCLA requirements and institutional policies.</p>
+
+    <h3>WILL I BE PAID FOR MY PARTICIPATION?</h3>
+    <p>You will not receive monetary payment for participating. You will receive <span class="todo">[X.X]</span> research participation credits through the UCLA Psychology Department Subject Pool (SONA) for participating in this study. You will receive this credit even if you choose to stop before finishing.</p>
+
+    <h3>WHO CAN I CONTACT IF I HAVE QUESTIONS ABOUT THIS STUDY?</h3>
+    <h4>The research team:</h4>
+    <p>If you have any questions, comments, or concerns about the research, please contact <span class="cfg-contact"></span> or Dr. Aaron P. Blaisdell at blaisdell@psych.ucla.edu.</p>
+    <h4>UCLA Office of the Human Research Protection Program (OHRPP):</h4>
+    <p>If you have questions about your rights as a research subject, or you have concerns or suggestions and you want to talk to someone other than the researchers, you may contact the UCLA OHRPP by phone: (310) 206-2040; by email: participants@research.ucla.edu; or by mail: Box 951406, Los Angeles, CA 90095-1406.</p>
+
+    <h3>WHAT ARE MY RIGHTS IF I TAKE PART IN THIS STUDY?</h3>
+    <ul>
+      <li>You can choose whether or not you want to be in this study, and you may withdraw your consent and discontinue participation at any time.</li>
+      <li>Whatever decision you make, there will be no penalty to you and no loss of benefits to which you were otherwise entitled.</li>
+      <li>You may refuse to answer any survey questions that you do not want to answer and still remain in the study.</li>
+    </ul>
+
+    <h3>AGREEMENT TO PARTICIPATE</h3>
+    <p>By selecting “I agree to participate” below, you confirm that you have read the information above, are at least 18 years old, and voluntarily agree to participate in this research study.</p>
+    <div class="consent-choice">
+      <label><input type="radio" name="consent" value="agree">I agree to participate</label>
+      <label><input type="radio" name="consent" value="decline">I do not agree to participate</label>
+    </div>
+    <p>If you select “I do not agree to participate,” you will not proceed to the research procedures. You may save or print a copy of this information for your records.</p>
+    <p><button type="button" class="linklike" id="btn-print">Print or save a copy of this information</button></p>
+  </div>
+  <button id="btn-consent" disabled>Continue</button>
+</div>
+
+<!-- ════════ DECLINED ════════ -->
+<div id="screen-declined" class="screen">
+  <h2>Thank you</h2>
+  <div class="box">
+    <p>You have chosen not to participate in this study. No information has been recorded. You may now close this window.</p>
+  </div>
+</div>
+
+<!-- ════════ INSTRUCTIONS (text from the Python version) ════════ -->
+<div id="screen-instructions" class="screen dark-screen">
+  <p>In this game you'll see one object at the top and two objects below it.<br>
+     Click the top object, then click the bottom object that goes with it.</p>
+  <p>There is always a correct answer.<br>
+     In some rounds you'll find out right away whether you were right.<br>
+     In other rounds you won't find out until later - just make your best guess.</p>
+  <p id="load-status">Loading images…</p>
+  <button id="btn-start" disabled>Begin</button>
+</div>
+
+<!-- ════════ TASK ════════ -->
+<div id="screen-task" class="screen">
+  <div id="fixation">+</div>
+  <img id="stim-sample" class="stim" alt="" draggable="false">
+  <img id="stim-L" class="stim" alt="" draggable="false">
+  <img id="stim-R" class="stim" alt="" draggable="false">
+  <div id="feedback"></div>
+  <div id="debug-info"></div>
+</div>
+
+<!-- ════════ ATTENTION CHECK ════════ -->
+<div id="screen-check" class="screen dark-screen">
+  <p id="check-prompt"></p>
+  <div class="check-options" id="check-options"></div>
+</div>
+
+<!-- ════════ RETENTION TEST ════════ -->
+<div id="screen-retention" class="screen">
+  <div id="ret-instr">Match each object on the LEFT to the one it goes with.<br>
+    Drag each tile from the right onto the box next to its partner.</div>
+  <div id="ret-area"></div>
+  <button id="ret-done">Done</button>
+</div>
+
+<!-- ════════ TASK COMPLETE ════════ -->
+<div id="screen-end" class="screen">
+  <h2>Task complete!</h2>
+  <div class="box">
+    <p>You have completed the picture-matching task. Please continue to the brief post-task survey.</p>
+  </div>
+  <button id="btn-to-survey">Continue</button>
+</div>
+
+<!-- ════════ POST-TASK SURVEY ════════ -->
+<div id="screen-survey" class="screen">
+  <h2>Post-Task Survey</h2>
+  <div class="box">
+    <p>Please answer the following questions about the task. All questions are optional, and you may skip any question you do not wish to answer.</p>
+  </div>
+  <form id="survey-form" class="box survey" onsubmit="return false;">
+    <div class="q">
+      <!-- Strategy report, same wording as the Python version -->
+      <div class="q-title">1. Please describe in a few sentences how you made your decisions, especially when you weren't sure of the answer.</div>
+      <textarea name="q1"></textarea>
+    </div>
+    <div class="q">
+      <!-- Added for the online version; delete if it isn't in the approved protocol -->
+      <div class="q-title">2. Sometimes an object appeared at the top that you had not learned yet. How did you decide which bottom object to pick in those rounds?</div>
+      <textarea name="q2"></textarea>
+    </div>
+    <div class="q">
+      <div class="q-title">3. What is your age?</div>
+      <input type="number" name="q3" min="18" max="99" step="1">
+      <label><input type="checkbox" name="q3_pna" value="Prefer not to answer">Prefer not to answer</label>
+    </div>
+    <div class="q">
+      <div class="q-title">4. What is your gender?</div>
+      <label><input type="radio" name="q4" value="Woman">Woman</label>
+      <label><input type="radio" name="q4" value="Man">Man</label>
+      <label><input type="radio" name="q4" value="Nonbinary">Nonbinary</label>
+      <label><input type="radio" name="q4" value="Another identity">Another identity:<input type="text" class="other" name="q4_other"></label>
+      <label><input type="radio" name="q4" value="Prefer not to answer">Prefer not to answer</label>
+    </div>
+    <div class="q">
+      <div class="q-title">5. What is your race/ethnicity? Select all that apply.</div>
+      <label><input type="checkbox" name="q5" value="American Indian or Alaska Native">American Indian or Alaska Native</label>
+      <label><input type="checkbox" name="q5" value="Asian">Asian</label>
+      <label><input type="checkbox" name="q5" value="Black or African American">Black or African American</label>
+      <label><input type="checkbox" name="q5" value="Hispanic or Latino/a/e">Hispanic or Latino/a/e</label>
+      <label><input type="checkbox" name="q5" value="Middle Eastern or North African">Middle Eastern or North African</label>
+      <label><input type="checkbox" name="q5" value="Native Hawaiian or Other Pacific Islander">Native Hawaiian or Other Pacific Islander</label>
+      <label><input type="checkbox" name="q5" value="White">White</label>
+      <label><input type="checkbox" name="q5" value="Another race or ethnicity">Another race or ethnicity:<input type="text" class="other" name="q5_other"></label>
+      <label><input type="checkbox" name="q5" value="Prefer not to answer">Prefer not to answer</label>
+    </div>
+    <div class="q">
+      <div class="q-title">6. What is your current year in school?</div>
+      <label><input type="radio" name="q6" value="First year">First year</label>
+      <label><input type="radio" name="q6" value="Second year">Second year</label>
+      <label><input type="radio" name="q6" value="Third year">Third year</label>
+      <label><input type="radio" name="q6" value="Fourth year">Fourth year</label>
+      <label><input type="radio" name="q6" value="Fifth year or beyond">Fifth year or beyond</label>
+      <label><input type="radio" name="q6" value="Graduate student">Graduate student</label>
+      <label><input type="radio" name="q6" value="Other">Other:<input type="text" class="other" name="q6_other"></label>
+      <label><input type="radio" name="q6" value="Prefer not to answer">Prefer not to answer</label>
+    </div>
+  </form>
+  <button id="btn-submit-survey">Submit</button>
+</div>
+
+<!-- ════════ THANK YOU + DEBRIEFING ════════
+     DRAFT debriefing statement. Replace with the OHRPP-approved text before launch. -->
+<div id="screen-thanks" class="screen">
+  <h2>Thank you!</h2>
+  <div class="box">
+    <p id="save-status" style="text-align:center;"></p>
+    <p id="code-line" style="text-align:center;font-size:0.95rem;"></p>
+  </div>
+  <div id="downloads"></div>
+  <div class="box sheet">
+    <h3 class="sheet-title">DEBRIEFING STATEMENT</h3>
+    <p class="sheet-title"><strong><span class="todo">[IRB-approved study title]</span></strong></p>
+    <p>Thank you for participating in this study.</p>
+    <p>The purpose of this research is to examine how people learn which pictures go together, and what they do when they meet a picture they have never learned. When people see an unfamiliar item next to familiar ones, they often reason “it can’t be that one, I already know what that goes with,” and choose the unfamiliar option instead. This is called <em>choice by exclusion</em>. We are also interested in whether a single such choice is enough for people to learn the new pairing, which is called <em>fast mapping</em>.</p>
+    <p>During the task, the number of picture pairs you learned grew over the session. At several points, a new picture appeared at the top in rounds where you did not receive feedback. These rounds measured how people choose when they have no learned answer. We are comparing when these choices appear as the number of learned pairs grows, and comparing human performance with that of other species, such as pigeons, that we have tested on a very similar task.</p>
+    <p>The instructions said that in some rounds you would “find out later” whether you were right. Those rounds had no single correct answer that you could have learned, so feedback was not given; we withheld it so that it would not change how you responded in later rounds. We did not otherwise provide false information about the study.</p>
+    <p>Please do not discuss the specific purpose of this study with other students who may participate in the future, as knowing this information in advance could influence their behavior and affect the results of the study.</p>
+    <p>If you have questions about this research, please contact <span class="cfg-contact"></span> or Dr. Aaron P. Blaisdell at blaisdell@psych.ucla.edu.</p>
+    <p>If you have questions about your rights as a research participant or concerns about the research, you may contact the UCLA Office of the Human Research Protection Program (OHRPP) at (310) 206-2040 or participants@research.ucla.edu.</p>
+    <p><strong>Thank you for your participation!</strong></p>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+//  SETTINGS — change these to adjust the experiment
+// ═══════════════════════════════════════════════════════════════
+const CONFIG = {
+  // ---- design constants (same names and values as H010_setsize_CBE.py) ----
+  SET_SIZES:      [3, 6, 12, 24, 48],   // cumulative trained pairs, phases 1-5
+  REPS_PER_PAIR:  8,                    // presentations per pair per phase
+  CBE_PROBES:     8,                    // non-reinforced CBE probes per test
+  FM_PROBES:      8,                    // non-reinforced FM probes per test (2 NC2 x 4)
+  CBE_CRITERION:  6,                    // >= this of 8 -> pass CBE, run FM
+  FM_CRITERION:   6,                    // >= this of 8 -> pass FM
+  MAINT_PER_TEST: 16,                   // reinforced maintenance trials per test block
+
+  // 'stop_on_fm' | 'all_phases' | 'random' (random = each participant is assigned 50/50).
+  // Set to stop_on_fm: the session ends after the first phase whose FM test is passed.
+  // (?version=all_phases in the link only works together with ?test=1 or ?debug=1.)
+  version: 'stop_on_fm',
+
+  // ---- timing (ms), same as the Python version ----
+  FIXATION_MS: 300,
+  FEEDBACK_MS: 300,
+  ITI_MS:      500,
+
+  // ---- geometry: fractions of the window, as in the Python version ----
+  STIM_PX: 240,          // max stimulus size; shrinks to 26% of window height on small screens
+  SAMPLE_Y: 0.30,
+  COMP_Y: 0.64,
+  COMP_X: [0.32, 0.68],
+  FEEDBACK_Y: 0.46,
+  RET_THUMB_MAX: 80,     // max retention-test tile size (Python used 64)
+
+  // ---- stimuli ----
+  // source: 'files'     -> your own images (.png/.jpg/.jpeg) in the stimuli/ folder next to
+  //                        index.html. A browser can't list a folder, so the file names come
+  //                        from stimuli/stimuli.js, which make_stimulus_list.py writes for you
+  //                        (re-run it whenever you add, remove, or rename images).
+  //                        You can instead type the names into `files` below; if `files` is
+  //                        not empty it is used and stimuli.js is ignored.
+  // source: 'generated' -> kaleidoscopic images drawn in the browser from `seed` (no files needed).
+  // Either way the pool is sorted by name and roles are assigned per participant, as in the
+  // Python version (sample / comparison / NC2 roles are shuffled from the same pool).
+  stimuli: {
+    source: 'files',
+    folder: 'stimuli/',
+    files: [],
+    seed: 1010,
+  },
+
+  // ---- attention checks (online-only addition) ----
+  // One per phase from checkFirstPhase on, after a random training trial in the middle half
+  // of that phase's training block (never adjacent to a probe). false = off.
+  attentionChecks: true,
+  checkFirstPhase: 2,
+  checkWords: ['Purple', 'Green', 'Pink', 'Gray'],
+
+  // ---- study info ----
+  studyCode: 'H010',
+  contactName: 'Kayley Ozimac',
+  contactEmail: 'YOUR_EMAIL@ucla.edu',          // TODO: shown on consent, debrief, and thank-you page
+  creditInstructions: 'Please email YOUR_EMAIL@ucla.edu with your participant code for SONA credit.', // TODO
+};
+
+const DATAPIPE_EXPERIMENT_ID = '9cYgzHMxpqnj';   // TODO: new DataPipe experiment for H010
+
+// ═══════════════════════════════════════════════════════════════
+//  URL OPTIONS
+// ═══════════════════════════════════════════════════════════════
+const params = new URLSearchParams(window.location.search);
+const DEBUG = params.get('debug') === '1';
+const IS_TEST = DEBUG || params.get('test') === '1';
+const BOT = DEBUG && params.has('bot') ? Math.min(1, Math.max(0, parseFloat(params.get('bot')) || 0.9)) : null;
+const BOT_PROBE = params.has('botprobe') ? parseFloat(params.get('botprobe')) : 1;
+if (BOT != null) { CONFIG.FIXATION_MS = 5; CONFIG.FEEDBACK_MS = 5; CONFIG.ITI_MS = 5; }
+const VERSION_STOP = 'stop_on_fm', VERSION_ALL = 'all_phases';
+
+// ═══════════════════════════════════════════════════════════════
+//  SEEDED RANDOM NUMBERS (stand-in for Python's Random(seed))
+// ═══════════════════════════════════════════════════════════════
+function hashSeed(str) {                 // deterministic 32-bit seed from a string
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function makeRng(seed) {
+  const r = mulberry32(seed);
+  return {
+    random: r,
+    int: n => Math.floor(r() * n),
+    choice(arr) { return arr[Math.floor(r() * arr.length)]; },
+    shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; },
+    weighted(items, weights) {
+      const total = weights.reduce((a, b) => a + b, 0);
+      let x = r() * total;
+      for (let i = 0; i < items.length; i++) { x -= weights[i]; if (x < 0) return items[i]; }
+      return items[items.length - 1];
+    },
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  DATAPIPE (same as H009)
+// ═══════════════════════════════════════════════════════════════
+function makeParticipantCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  return 'P' + Array.from(bytes, b => chars[b % chars.length]).join('');
+}
+
+async function sendToDataPipe(filename, csvString) {
+  if (DATAPIPE_EXPERIMENT_ID.startsWith('REPLACE')) { console.warn('DataPipe ID not set; not uploading', filename); return false; }
+  const body = JSON.stringify({ experimentID: DATAPIPE_EXPERIMENT_ID, filename, data: csvString });
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch('https://pipe.jspsych.org/api/data/', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Accept: '*/*' }, body,
+      });
+      if (res.status === 201 || res.status === 202) return true;
+      const result = await res.json().catch(() => ({}));
+      if (result.error === 'FILE_EXISTS') return true;
+      console.error('DataPipe error:', res.status, result.error, result.message);
+      if (res.status === 400) return false;
+    } catch (err) {
+      console.error(`Network error (attempt ${attempt}):`, err);
+    }
+    await new Promise(r => setTimeout(r, 2000 * attempt));
+  }
+  return false;
+}
+
+function trackedSave(filename, csvString) {
+  S.files[filename] = csvString;           // kept for the test-mode / failure download buttons
+  S.pendingUploads++;
+  return sendToDataPipe(filename, csvString).finally(() => { S.pendingUploads--; });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  STATE
+// ═══════════════════════════════════════════════════════════════
+const S = {
+  pid: '', seed: 0, version: '', date: '', time: '',
+  rng: null,
+  pool: [], src: {},                       // stimulus names -> image URL
+  trainedSamples: [], trainedComps: [], pairMap: {}, nc2ByPhase: {}, spare: [],
+  queue: [], qi: 0,
+  trialCounter: 0, reinforcedCounter: 0,
+  cbeCorrect: {}, fmCorrect: {}, cbeRun: {}, fmRun: {},
+  reachedN: 0,
+  t: null, phase: null, n: null, base: null,
+  stage: 'idle',                           // 'sample' | 'choice' | other: which click is live
+  t0: 0, sessionStart: 0,
+  rows: [], files: {}, pendingUploads: 0,
+  attnPassed: 0, attnTotal: 0,
+  retention: null, retentionCorrect: null, retentionN: null,
+  finished: false,
+};
+window.__task = S;
+
+// ═══════════════════════════════════════════════════════════════
+//  STIMULI
+// ═══════════════════════════════════════════════════════════════
+function stimulusNeed() {
+  const maxPairs = Math.max(...CONFIG.SET_SIZES);
+  const nTested = CONFIG.SET_SIZES.length - 1;
+  return { maxPairs, nTested, nNc2: 2 * nTested, need: 2 * maxPairs + 2 * nTested };
+}
+
+// Kaleidoscopic image: shapes drawn in one wedge, mirrored and rotated around the center.
+function makeKaleidoscope(seed, size) {
+  const R = mulberry32(seed), rnd = (a, b) => a + (b - a) * R(), pick = arr => arr[Math.floor(R() * arr.length)];
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  const rad = size / 2;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, size, size);
+
+  const folds = pick([5, 6, 7, 8, 9, 10, 12]);
+  const wedge = Math.PI / folds;
+  const hue = rnd(0, 360);
+  const offsets = pick([[0, 30, 60], [0, 180, 30], [0, 120, 240], [0, 150, 210], [0, 90, 180]]);
+  const palette = [...Array(5)].map((_, i) =>
+    `hsl(${(hue + offsets[i % 3] + rnd(-12, 12)).toFixed(0)}, ${rnd(55, 95).toFixed(0)}%, ${rnd(35, 72).toFixed(0)}%)`);
+  const bg = `hsl(${(hue + pick(offsets)).toFixed(0)}, ${rnd(35, 70).toFixed(0)}%, ${rnd(8, 22).toFixed(0)}%)`;
+
+  const shapes = [];
+  const nShapes = 7 + Math.floor(R() * 6);
+  for (let i = 0; i < nShapes; i++) {
+    const d = rad * Math.sqrt(R()) * 0.95;
+    shapes.push({
+      type: pick(['circle', 'ring', 'petal', 'petal', 'poly', 'ray']),
+      x: d * Math.cos(rnd(0, wedge)), y: d * Math.sin(rnd(0, wedge)),
+      size: rad * rnd(0.05, 0.3), rot: rnd(0, Math.PI), sides: 3 + Math.floor(R() * 4),
+      color: pick(palette), alpha: rnd(0.55, 1), lw: rad * rnd(0.015, 0.05),
+    });
+  }
+  function drawShape(s) {
+    ctx.globalAlpha = s.alpha; ctx.fillStyle = s.color; ctx.strokeStyle = s.color; ctx.lineWidth = s.lw;
+    ctx.beginPath();
+    if (s.type === 'circle') { ctx.arc(s.x, s.y, s.size * 0.6, 0, 2 * Math.PI); ctx.fill(); }
+    else if (s.type === 'ring') { ctx.arc(s.x, s.y, s.size * 0.7, 0, 2 * Math.PI); ctx.stroke(); }
+    else if (s.type === 'petal') { ctx.ellipse(s.x, s.y, s.size, s.size * 0.32, s.rot, 0, 2 * Math.PI); ctx.fill(); }
+    else if (s.type === 'poly') {
+      for (let k = 0; k <= s.sides; k++) {
+        const a = s.rot + 2 * Math.PI * k / s.sides;
+        const px = s.x + s.size * 0.7 * Math.cos(a), py = s.y + s.size * 0.7 * Math.sin(a);
+        k ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+      }
+      ctx.fill();
+    } else { // ray
+      const a = Math.atan2(s.y, s.x), d0 = Math.hypot(s.x, s.y);
+      ctx.moveTo(Math.cos(a) * d0, Math.sin(a) * d0);
+      ctx.lineTo(Math.cos(a) * (d0 + s.size * 1.5), Math.sin(a) * (d0 + s.size * 1.5));
+      ctx.lineWidth = s.lw * 1.5; ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+  function drawWedge() {
+    ctx.save();
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, rad, -0.003, wedge + 0.003); ctx.closePath(); ctx.clip();
+    shapes.forEach(drawShape);
+    ctx.restore();
+  }
+  ctx.save();
+  ctx.translate(rad, rad);
+  ctx.beginPath(); ctx.arc(0, 0, rad - 2, 0, 2 * Math.PI); ctx.clip();
+  ctx.fillStyle = bg; ctx.fillRect(-rad, -rad, size, size);
+  for (let i = 0; i < folds; i++) {
+    ctx.save(); ctx.rotate(i * 2 * wedge);
+    drawWedge();
+    ctx.scale(1, -1); drawWedge();
+    ctx.restore();
+  }
+  ctx.restore();
+  return c.toDataURL('image/png');
+}
+
+// Builds the pool (names + URLs) and preloads it. Resolves when every image is decoded.
+async function loadStimuli(onProgress) {
+  const { need } = stimulusNeed();
+  const names = [], src = {};
+  if (CONFIG.stimuli.source === 'files') {
+    let list = CONFIG.stimuli.files;
+    if (!list.length) {
+      // stimuli/stimuli.js sets window.STIMULUS_FILES = [...] (a script tag also works when
+      // index.html is opened straight from your computer, where fetching a .json file would not)
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = CONFIG.stimuli.folder + 'stimuli.js?v=' + Date.now();
+        s.onload = resolve;
+        s.onerror = () => reject(new Error(`Could not load ${CONFIG.stimuli.folder}stimuli.js — run make_stimulus_list.py`));
+        document.head.appendChild(s);
+      });
+      list = window.STIMULUS_FILES || [];
+    }
+    const exts = /\.(png|jpe?g)$/i;
+    const files = [...new Set(list.filter(f => exts.test(f)))].sort();
+    if (files.length < need) throw new Error(`Need at least ${need} images (${2 * stimulusNeed().maxPairs} for the trained pairs + ${stimulusNeed().nNc2} NC2 foils); found ${files.length}.`);
+    files.forEach(f => { names.push(f); src[f] = CONFIG.stimuli.folder + encodeURIComponent(f); });
+  } else {
+    for (let i = 0; i < need; i++) {
+      const name = `kal_${String(i + 1).padStart(3, '0')}`;
+      names.push(name);
+      src[name] = makeKaleidoscope(CONFIG.stimuli.seed * 1000 + i, 256);
+      if (i % 8 === 7) { onProgress(i + 1, need); await new Promise(r => setTimeout(r, 0)); }
+    }
+  }
+  let done = 0;
+  await Promise.all(names.map(n => new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => { onProgress(++done, names.length); resolve(); };
+    img.onerror = () => reject(new Error('Could not load ' + src[n]));
+    img.src = src[n];
+  })));
+  return { names, src };
+}
+
+// ---- role assignment (port of _assign_roles) ----
+function assignRoles() {
+  const { maxPairs, nTested, nNc2 } = stimulusNeed();
+  const pool = S.rng.shuffle(S.pool.slice());          // pool is already sorted
+  S.trainedSamples = pool.slice(0, maxPairs);          // pair k -> index k-1
+  S.trainedComps = pool.slice(maxPairs, 2 * maxPairs);
+  S.pairMap = {};
+  S.trainedSamples.forEach((s, i) => { S.pairMap[s] = S.trainedComps[i]; });
+  const nc2 = pool.slice(2 * maxPairs, 2 * maxPairs + nNc2);
+  S.nc2ByPhase = {};
+  for (let p = 1; p <= nTested; p++) S.nc2ByPhase[p] = nc2.slice(2 * (p - 1), 2 * (p - 1) + 2);
+  S.spare = pool.slice(2 * maxPairs + nNc2);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  TRIAL BUILDERS (ports of the Python _build_* methods)
+// ═══════════════════════════════════════════════════════════════
+function bagCycle(items, reps) {
+  const seq = [];
+  for (let r = 0; r < reps; r++) {
+    const bag = S.rng.shuffle(items.slice());
+    if (seq.length && bag.length > 1 && seq[seq.length - 1] === bag[0]) [bag[0], bag[1]] = [bag[1], bag[0]];
+    seq.push(...bag);
+  }
+  return seq;
+}
+
+// n booleans (true = correct comparison on the LEFT): equal L/R, pseudo-random order, runs <= maxRun
+function balancedSides(n, maxRun = 3) {
+  const remaining = { true: Math.floor(n / 2), false: n - Math.floor(n / 2) };
+  const out = [];
+  let runSide = null, runLen = 0;
+  for (let i = 0; i < n; i++) {
+    let choices = [true, false].filter(s => remaining[s] > 0);
+    if (runSide !== null && runLen >= maxRun && choices.length > 1) choices = choices.filter(s => s !== runSide);
+    const s = S.rng.weighted(choices, choices.map(c => remaining[c]));
+    out.push(s);
+    remaining[s]--;
+    runLen = (s === runSide) ? runLen + 1 : 1;
+    runSide = s;
+  }
+  return out;
+}
+
+function pack(sample, correct, foil, corrLeft, trialType, leftRole, rightRole, reinforced, tag) {
+  return {
+    id: null, sample, correct,
+    compLeft: corrLeft ? correct : foil, compRight: corrLeft ? foil : correct,
+    correctPos: corrLeft ? 'L' : 'R', leftRole, rightRole,
+    trialType, reinforced, tag: tag || {},
+  };
+}
+
+function buildTrainingTrials(nPairs) {
+  const active = S.trainedSamples.slice(0, nPairs);
+  const order = bagCycle(active, CONFIG.REPS_PER_PAIR);
+  const sides = balancedSides(order.length);
+  return order.map((s, i) => {
+    const corrLeft = sides[i];
+    const foil = S.rng.choice(active.filter(o => o !== s).map(o => S.pairMap[o]));
+    return pack(s, S.pairMap[s], foil, corrLeft, 'training',
+      corrLeft ? 'correct' : 'trained_foil', corrLeft ? 'trained_foil' : 'correct', true);
+  });
+}
+
+function maintenance(n) { return buildTrainingTrials(n).slice(0, CONFIG.MAINT_PER_TEST); }
+
+function buildCbeTest(phase, n, ns, nc1) {
+  const probes = balancedSides(CONFIG.CBE_PROBES).map(corrLeft => {
+    const foil = S.rng.choice(S.trainedComps.slice(0, n).filter(c => c !== nc1));
+    return pack(ns, nc1, foil, corrLeft, 'CBE_probe',
+      corrLeft ? 'novel_correct' : 'familiar_foil', corrLeft ? 'familiar_foil' : 'novel_correct',
+      false, { pair: n + 1 });
+  });
+  return interleave(maintenance(n), probes);
+}
+
+function buildFmTest(phase, n, ns, nc1) {
+  const [nc2a, nc2b] = S.nc2ByPhase[phase];
+  const probes = balancedSides(CONFIG.FM_PROBES).map((corrLeft, i) => {
+    const nc2 = i < Math.floor(CONFIG.FM_PROBES / 2) ? nc2a : nc2b;
+    return pack(ns, nc1, nc2, corrLeft, 'FM_probe',
+      corrLeft ? 'novel_correct' : 'novel_foil', corrLeft ? 'novel_foil' : 'novel_correct',
+      false, { pair: n + 1 });
+  });
+  return interleave(maintenance(n), probes);
+}
+
+// Embed probes through standard trials; never two probes adjacent (same algorithm as Python)
+function interleave(standard, probes) {
+  if (!probes.length) return standard;
+  const seq = [], gap = Math.max(1, Math.floor(standard.length / (probes.length + 1)));
+  let si = 0, pi = 0;
+  while (si < standard.length || pi < probes.length) {
+    for (let g = 0; g < gap; g++) if (si < standard.length) seq.push(standard[si++]);
+    if (pi < probes.length) seq.push(probes[pi++]);
+  }
+  return seq;
+}
+
+// ---- session plan (port of _build_session_plan, plus attention checks) ----
+function buildSessionPlan() {
+  const q = [];
+  const words = S.rng.shuffle(CONFIG.checkWords.slice());
+  let nCheck = 0;
+  CONFIG.SET_SIZES.forEach((n, idx) => {
+    const phase = idx + 1;
+    const training = buildTrainingTrials(n);
+    let checkAfter = -1;
+    if (CONFIG.attentionChecks && phase >= CONFIG.checkFirstPhase) {
+      const lo = Math.floor(training.length * 0.25), hi = Math.floor(training.length * 0.75);
+      checkAfter = lo + S.rng.int(hi - lo + 1);
+    }
+    training.forEach((t, i) => {
+      q.push({ kind: 'trial', t, phase, n });
+      if (i === checkAfter) q.push({ kind: 'check', word: words[nCheck++ % words.length], phase, n });
+    });
+    if (phase < CONFIG.SET_SIZES.length) {               // a next pair exists to test
+      const k = n + 1;
+      const ns = S.trainedSamples[k - 1], nc1 = S.trainedComps[k - 1];
+      buildCbeTest(phase, n, ns, nc1).forEach(t => q.push({ kind: 'trial', t, phase, n }));
+      q.push({ kind: 'cbe_gate', phase, n, ns, nc1 });
+      q.push({ kind: 'fm_stopcheck', phase });
+    }
+  });
+  q.push({ kind: 'retention' }, { kind: 'end' });
+  S.queue = q;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  DATA LOGGING (same columns as the Python CSV, plus SessionTime and Date)
+// ═══════════════════════════════════════════════════════════════
+const COLUMNS = [
+  'SysTime', 'PID', 'Age', 'Gender', 'Version', 'Phase', 'SetSize',
+  'TrialNum', 'ReinforcedNum', 'TrialType', 'SubStage', 'Event', 'Sample',
+  'CompLeft', 'CompRight', 'CorrectComp', 'CorrectPos',
+  'LeftRole', 'RightRole', 'Chosen', 'ChosenPos', 'ChosenRole',
+  'Outcome', 'Latency', 'FeedbackShown', 'ProbePair',
+  'SessionTime', 'Date',
+];
+const KEYMAP = {
+  Phase: 'phase', SetSize: 'set_size', TrialNum: 'trial_num', ReinforcedNum: 'reinforced_num',
+  TrialType: 'trial_type', SubStage: 'substage', Event: 'event', Sample: 'sample',
+  CompLeft: 'comp_left', CompRight: 'comp_right', CorrectComp: 'correct', CorrectPos: 'correct_pos',
+  LeftRole: 'left_role', RightRole: 'right_role', Chosen: 'chosen', ChosenPos: 'chosen_pos',
+  ChosenRole: 'chosen_role', Outcome: 'outcome', Latency: 'latency', FeedbackShown: 'feedback',
+  ProbePair: 'probe_pair',
+};
+const pad = (n, w = 2) => String(n).padStart(w, '0');
+function sysTime() {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+         `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
+}
+function logRow(k) {
+  const row = { SysTime: sysTime(), PID: S.pid, Age: 'NA', Gender: 'NA', Version: S.version, Date: S.date,
+    SessionTime: S.sessionStart ? ((performance.now() - S.sessionStart) / 1000).toFixed(3) : '' };
+  for (const col in KEYMAP) row[col] = k[KEYMAP[col]] != null ? k[KEYMAP[col]] : '';
+  S.rows.push(row);
+}
+function csvCell(v) {
+  const str = String(v == null ? '' : v);
+  return /[",\n\r]/.test(str) ? '"' + str.replace(/"/g, '""') + '"' : str;
+}
+function toCSV(columns, rows) {
+  return [columns.join(','), ...rows.map(r => columns.map(c => csvCell(r[c])).join(','))].join('\n');
+}
+const fileStem = () => `${IS_TEST ? 'TEST_' : ''}${CONFIG.studyCode}_${S.pid}_${S.date}_${S.time}`;
+
+// ═══════════════════════════════════════════════════════════════
+//  SCREENS & LAYOUT
+// ═══════════════════════════════════════════════════════════════
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  const el = document.getElementById(id);
+  el.classList.add('active');
+  document.body.classList.toggle('dark', el.classList.contains('dark-screen') || id === 'screen-task' || id === 'screen-retention');
+}
+const $ = id => document.getElementById(id);
+const elSample = $('stim-sample'), elL = $('stim-L'), elR = $('stim-R');
+const elFix = $('fixation'), elFB = $('feedback');
+
+function stimPx() { return Math.min(CONFIG.STIM_PX, Math.floor(window.innerHeight * 0.26)); }
+function placeStim(el, name, cx, cy, px) {
+  el.src = S.src[name];
+  el.style.width = el.style.height = px + 'px';
+  el.style.left = (cx - px / 2) + 'px';
+  el.style.top = (cy - px / 2) + 'px';
+  el.style.display = 'block';
+  el.classList.remove('selected', 'debug-correct');
+}
+function clearStage() {
+  [elSample, elL, elR].forEach(el => { el.style.display = 'none'; el.classList.remove('selected', 'debug-correct'); });
+  elFix.style.display = 'none';
+  elFB.style.display = 'none';
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  TASK FLOW (port of _advance and the trial methods)
+// ═══════════════════════════════════════════════════════════════
+function advance() {
+  if (S.qi >= S.queue.length) return;
+  const item = S.queue[S.qi++];
+  switch (item.kind) {
+    case 'trial':        return startTrial(item.t, item.phase, item.n);
+    case 'check':        return runAttentionCheck(item);
+    case 'cbe_gate':     return cbeGate(item);
+    case 'fm_stopcheck': return fmStopcheck(item.phase);
+    case 'retention':    return runRetention();
+    case 'end':          return finishTask();
+  }
+}
+
+function cbeGate({ phase, n, ns, nc1 }) {
+  S.cbeRun[phase] = true;
+  if ((S.cbeCorrect[phase] || 0) >= CONFIG.CBE_CRITERION) {
+    S.fmRun[phase] = true;
+    const fm = buildFmTest(phase, n, ns, nc1).map(t => ({ kind: 'trial', t, phase, n }));
+    S.queue.splice(S.qi, 0, ...fm);
+  }
+  advance();
+}
+
+function fmStopcheck(phase) {
+  if (S.version === VERSION_STOP && (S.fmCorrect[phase] || 0) >= CONFIG.FM_CRITERION) {
+    const j = S.queue.findIndex((it, idx) => idx >= S.qi && it.kind === 'retention');
+    if (j >= 0) S.qi = j;
+  }
+  advance();
+}
+
+function startTrial(t, phase, n) {
+  S.trialCounter++;
+  if (t.reinforced) S.reinforcedCounter++;
+  t.id = S.trialCounter;
+  S.reachedN = Math.max(S.reachedN, n);
+  S.t = t; S.phase = phase; S.n = n;
+  S.base = {
+    phase, set_size: n, trial_num: S.trialCounter,
+    reinforced_num: t.reinforced ? S.reinforcedCounter : '',
+    trial_type: t.trialType, sample: t.sample, comp_left: t.compLeft, comp_right: t.compRight,
+    correct: t.correct, correct_pos: t.correctPos, left_role: t.leftRole, right_role: t.rightRole,
+    probe_pair: t.tag.pair != null ? t.tag.pair : '',
+  };
+  clearStage();
+  elFix.style.left = (window.innerWidth / 2) + 'px';
+  elFix.style.top = (window.innerHeight / 2) + 'px';
+  elFix.style.display = 'block';
+  if (DEBUG) {
+    $('debug-info').textContent =
+      `Trial ${S.trialCounter} | phase ${phase} (set size ${n}) | ${t.trialType}` +
+      `${t.tag.pair ? ' (pair ' + t.tag.pair + ')' : ''} | correct ${t.correctPos} | ` +
+      `CBE p${phase}: ${S.cbeCorrect[phase] || 0} | FM p${phase}: ${S.fmCorrect[phase] || 0} | version ${S.version}`;
+  }
+  setTimeout(samplePhase, CONFIG.FIXATION_MS);
+}
+
+function samplePhase() {
+  clearStage();
+  const px = stimPx();
+  placeStim(elSample, S.t.sample, window.innerWidth / 2, Math.round(window.innerHeight * CONFIG.SAMPLE_Y), px);
+  S.stage = 'sample';
+  logRow({ substage: 1, event: 'sample_onset', ...S.base });
+  if (BOT != null) setTimeout(onSampleClick, 1);
+}
+
+function onSampleClick() {
+  if (S.stage !== 'sample') return;
+  S.stage = 'busy';
+  elSample.classList.add('selected');
+  logRow({ substage: 1, event: 'sample_click', ...S.base });
+  comparisonPhase();
+}
+
+function comparisonPhase() {
+  const px = stimPx(), W = window.innerWidth, H = window.innerHeight;
+  const y = Math.round(H * CONFIG.COMP_Y);
+  placeStim(elL, S.t.compLeft, Math.round(W * CONFIG.COMP_X[0]), y, px);
+  placeStim(elR, S.t.compRight, Math.round(W * CONFIG.COMP_X[1]), y, px);
+  if (DEBUG) (S.t.correctPos === 'L' ? elL : elR).classList.add('debug-correct');
+  S.t0 = performance.now();
+  S.stage = 'choice';
+  logRow({ substage: 2, event: 'comparison_onset', ...S.base });
+  if (BOT != null) {
+    const right = Math.random() < (S.t.reinforced ? BOT : BOT_PROBE);   // probes: picks NC1 with p = BOT_PROBE
+    setTimeout(() => onChoice(right === (S.t.correctPos === 'L') ? 'L' : 'R'), 1);
+  }
+}
+
+function onChoice(pos) {
+  if (S.stage !== 'choice') return;
+  S.stage = 'busy';
+  const rt = (performance.now() - S.t0) / 1000;
+  const t = S.t;
+  const chosen = pos === 'L' ? t.compLeft : t.compRight;
+  const chosenRole = pos === 'L' ? t.leftRole : t.rightRole;
+  const correct = (chosen === t.correct);
+  if (t.trialType === 'CBE_probe' && correct) S.cbeCorrect[S.phase] = (S.cbeCorrect[S.phase] || 0) + 1;
+  if (t.trialType === 'FM_probe' && correct) S.fmCorrect[S.phase] = (S.fmCorrect[S.phase] || 0) + 1;
+
+  (pos === 'L' ? elL : elR).classList.add('selected');
+
+  let fbText, fbColor, feedbackShown;
+  if (t.reinforced) {
+    fbText = correct ? 'Correct!' : 'Incorrect';
+    fbColor = correct ? '#33cc33' : '#ff5555';
+    feedbackShown = fbText;
+  } else {
+    fbText = "Got it - you'll find out later.";
+    fbColor = '#cccccc';
+    feedbackShown = 'deferred';
+  }
+  elFB.textContent = fbText;
+  elFB.style.color = fbColor;
+  elFB.style.left = (window.innerWidth / 2) + 'px';
+  elFB.style.top = Math.round(window.innerHeight * CONFIG.FEEDBACK_Y) + 'px';
+  elFB.style.display = 'block';
+
+  logRow({ substage: 2, event: 'choice', chosen, chosen_pos: pos, chosen_role: chosenRole,
+           outcome: correct ? 'correct' : 'incorrect', latency: rt.toFixed(4),
+           feedback: feedbackShown, ...S.base });
+  setTimeout(postFeedback, CONFIG.FEEDBACK_MS);
+}
+
+function postFeedback() {
+  clearStage();
+  setTimeout(advance, CONFIG.ITI_MS);
+}
+
+// Clicks: pointerdown (fires on press, like Tkinter <Button-1>)
+elSample.addEventListener('pointerdown', e => { e.preventDefault(); onSampleClick(); });
+elL.addEventListener('pointerdown', e => { e.preventDefault(); onChoice('L'); });
+elR.addEventListener('pointerdown', e => { e.preventDefault(); onChoice('R'); });
+
+// ═══════════════════════════════════════════════════════════════
+//  ATTENTION CHECK
+// ═══════════════════════════════════════════════════════════════
+function runAttentionCheck(item) {
+  clearStage();
+  $('check-prompt').innerHTML = `To show you’re paying attention, please select the word <strong>${item.word}</strong>.`;
+  const box = $('check-options');
+  box.innerHTML = '';
+  const shownAt = performance.now();
+  let target = null;
+  S.rng.shuffle(CONFIG.checkWords.slice()).forEach(word => {
+    const b = document.createElement('button');
+    b.textContent = word;
+    if (word === item.word) target = b;
+    b.addEventListener('click', () => {
+      const passed = (word === item.word);
+      S.attnTotal++;
+      if (passed) S.attnPassed++;
+      logRow({ phase: item.phase, set_size: item.n, trial_type: 'attention_check',
+               event: passed ? 'attention_check_pass' : 'attention_check_fail',
+               correct: item.word, chosen: word, outcome: passed ? 'correct' : 'incorrect',
+               latency: ((performance.now() - shownAt) / 1000).toFixed(4) });
+      showScreen('screen-task');
+      setTimeout(advance, CONFIG.ITI_MS);
+    }, { once: true });
+    box.appendChild(b);
+  });
+  showScreen('screen-check');
+  if (BOT != null) setTimeout(() => target.click(), 1);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  RETENTION TEST — drag each comparison tile onto its correct sample
+// ═══════════════════════════════════════════════════════════════
+function layoutRetention(n) {
+  const W = window.innerWidth, H = window.innerHeight;
+  const top = 100, bottomReserve = 90, availH = H - top - bottomReserve;
+  const leftX0 = 60, leftX1 = Math.floor(W * 0.52);
+  const rightX0 = Math.floor(W * 0.55), rightX1 = W - 40;
+  let sCols, tCols;
+  if (n <= 6) [sCols, tCols] = [1, 2];
+  else if (n <= 12) [sCols, tCols] = [2, 3];
+  else if (n <= 24) [sCols, tCols] = [3, 4];
+  else [sCols, tCols] = [4, 6];
+  const sRows = Math.ceil(n / sCols), tRows = Math.ceil(n / tCols);
+  const rowH = availH / Math.max(sRows, tRows);
+  const leftColW = (leftX1 - leftX0) / sCols, rightColW = (rightX1 - rightX0) / tCols;
+  const gap = 16;
+  let thumb = Math.floor(Math.min(CONFIG.RET_THUMB_MAX, rowH - 12, (leftColW - gap - 10) / 2, rightColW - 10));
+  thumb = Math.max(thumb, 24);
+  const slots = S.trainedSamples.slice(0, n).map((s, i) => {
+    const c = Math.floor(i / sRows), r = i % sRows;
+    const sx = Math.floor(leftX0 + c * leftColW + thumb / 2);
+    const sy = Math.floor(top + r * rowH + rowH / 2);
+    const bx = sx + Math.floor(thumb / 2) + gap;
+    return { sample: s, sampleCenter: [sx, sy], box: [bx, sy - Math.floor(thumb / 2), bx + thumb, sy + Math.floor(thumb / 2)],
+             center: [bx + Math.floor(thumb / 2), sy], tile: null };
+  });
+  const homes = [...Array(n)].map((_, i) => {
+    const c = Math.floor(i / tRows), r = i % tRows;
+    return [Math.floor(rightX0 + c * rightColW + thumb / 2), Math.floor(top + r * rowH + rowH / 2)];
+  });
+  return { slots, homes, thumb };
+}
+
+function runRetention() {
+  clearStage();
+  const n = S.reachedN || CONFIG.SET_SIZES[CONFIG.SET_SIZES.length - 1];
+  const area = $('ret-area');
+  area.innerHTML = '';
+  const { slots, homes, thumb } = layoutRetention(n);
+  const R = S.retention = { n, slots, thumb, tiles: [] };
+
+  const mkImg = (name, cx, cy, cls) => {
+    const img = document.createElement('img');
+    img.src = S.src[name]; img.className = cls; img.draggable = false;
+    img.style.width = img.style.height = thumb + 'px';
+    img.style.left = (cx - thumb / 2) + 'px'; img.style.top = (cy - thumb / 2) + 'px';
+    area.appendChild(img);
+    return img;
+  };
+  slots.forEach(s => {
+    mkImg(s.sample, ...s.sampleCenter, 'ret-sample');
+    const b = document.createElement('div');
+    b.className = 'ret-box';
+    const [x0, y0, x1, y1] = s.box;
+    Object.assign(b.style, { left: x0 + 'px', top: y0 + 'px', width: (x1 - x0) + 'px', height: (y1 - y0) + 'px' });
+    area.appendChild(b);
+  });
+  const comps = S.rng.shuffle(slots.map(s => S.pairMap[s.sample]));
+  comps.forEach((comp, i) => {
+    const [hx, hy] = homes[i];
+    const tile = { comp, home: [hx, hy], pos: [hx, hy], slot: null, el: mkImg(comp, hx, hy, 'ret-tile') };
+    R.tiles.push(tile);
+    attachDrag(tile);
+  });
+  showScreen('screen-retention');
+  logRow({ phase: 'retention', set_size: n, trial_type: 'retention', event: 'retention_onset' });
+  if (BOT != null) setTimeout(() => {
+    R.tiles.forEach(t => dropTile(t, slots.findIndex(s => S.pairMap[s.sample] === t.comp)));
+    finishRetention();
+  }, 50);
+}
+
+function moveTile(tile, [x, y]) {
+  tile.pos = [x, y];
+  tile.el.style.left = (x - S.retention.thumb / 2) + 'px';
+  tile.el.style.top = (y - S.retention.thumb / 2) + 'px';
+}
+
+function dropTile(tile, idx) {
+  const slots = S.retention.slots;
+  if (idx != null && idx >= 0) {
+    const slot = slots[idx];
+    const occupant = slot.tile;
+    if (occupant && occupant !== tile) { moveTile(occupant, occupant.home); occupant.slot = null; }
+    slot.tile = tile; tile.slot = idx;
+    moveTile(tile, slot.center);
+  } else {
+    moveTile(tile, tile.home);
+  }
+}
+
+function attachDrag(tile) {
+  let ox = 0, oy = 0, dragging = false;
+  tile.el.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    tile.el.setPointerCapture(e.pointerId);
+    dragging = true;
+    tile.el.classList.add('dragging');
+    ox = e.clientX - tile.pos[0]; oy = e.clientY - tile.pos[1];
+    if (tile.slot != null) { S.retention.slots[tile.slot].tile = null; tile.slot = null; }
+  });
+  tile.el.addEventListener('pointermove', e => { if (dragging) moveTile(tile, [e.clientX - ox, e.clientY - oy]); });
+  const end = () => {
+    if (!dragging) return;
+    dragging = false;
+    tile.el.classList.remove('dragging');
+    const [cx, cy] = tile.pos;
+    const idx = S.retention.slots.findIndex(s => cx >= s.box[0] && cx <= s.box[2] && cy >= s.box[1] && cy <= s.box[3]);
+    dropTile(tile, idx);
+  };
+  tile.el.addEventListener('pointerup', end);
+  tile.el.addEventListener('pointercancel', end);
+}
+
+function finishRetention() {
+  const R = S.retention;
+  let nCorrect = 0;
+  const retRows = R.slots.map((slot, i) => {
+    const placed = slot.tile ? slot.tile.comp : '';
+    const truth = S.pairMap[slot.sample];
+    const ok = placed === truth;
+    nCorrect += ok ? 1 : 0;
+    logRow({ phase: 'retention', set_size: R.n, trial_num: `ret${i + 1}`, trial_type: 'retention',
+             substage: 2, event: 'match', sample: slot.sample, correct: truth, chosen: placed,
+             outcome: ok ? 'correct' : 'incorrect' });
+    return { Sample: slot.sample, CorrectComp: truth, PlacedComp: placed, Correct: ok ? 1 : 0 };
+  });
+  S.retentionCorrect = nCorrect; S.retentionN = R.n;
+  S.files.__retention = toCSV(['Sample', 'CorrectComp', 'PlacedComp', 'Correct'], retRows) +
+                        `\n\nAccuracy,${nCorrect}/${R.n}`;
+  $('ret-area').innerHTML = '';
+  advance();
+}
+$('ret-done').addEventListener('click', () => { if (S.retention && !S.finished) finishRetention(); });
+
+// ═══════════════════════════════════════════════════════════════
+//  END OF TASK, SURVEY, SAVING
+// ═══════════════════════════════════════════════════════════════
+function finishTask() {
+  logRow({ event: 'SessionEnds' });
+  S.finished = true;
+  showScreen('screen-end');
+  // Upload the task data right away, so it's saved even if the survey isn't completed
+  S.taskSave = Promise.all([
+    trackedSave(`${fileStem()}_data.csv`, toCSV(COLUMNS, S.rows)),
+    trackedSave(`${fileStem()}_retention.csv`, S.files.__retention),
+  ]).then(r => r.every(Boolean));
+  delete S.files.__retention;
+}
+
+const SURVEY_COLUMNS = [
+  'PID', 'Date', 'Version', 'Seed', 'ReachedSetSize',
+  'CBE_P1', 'FM_P1', 'CBE_P2', 'FM_P2', 'CBE_P3', 'FM_P3', 'CBE_P4', 'FM_P4',
+  'RetentionAccuracy', 'AttentionChecksPassed',
+  'Strategy', 'NovelChoiceStrategy',
+  'Age', 'Gender', 'GenderOther', 'RaceEthnicity', 'RaceEthnicityOther', 'YearInSchool', 'YearInSchoolOther',
+];
+
+function collectSurvey() {
+  const form = $('survey-form');
+  const text = name => form.elements[name].value.trim() || 'NA';
+  const radio = name => { const el = form.querySelector(`input[name="${name}"]:checked`); return el ? el.value : 'NA'; };
+  const checks = name => {
+    const vals = [...form.querySelectorAll(`input[name="${name}"]:checked`)].map(el => el.value);
+    return vals.length ? vals.join('; ') : 'NA';
+  };
+  const out = {
+    PID: S.pid, Date: S.date, Version: S.version, Seed: S.seed, ReachedSetSize: S.reachedN,
+    RetentionAccuracy: `${S.retentionCorrect}/${S.retentionN}`,
+    AttentionChecksPassed: `${S.attnPassed}/${S.attnTotal}`,
+    Strategy: text('q1'), NovelChoiceStrategy: text('q2'),
+    Age: form.elements.q3_pna.checked ? 'Prefer not to answer' : (form.elements.q3.value.trim() || 'NA'),
+    Gender: radio('q4'), GenderOther: text('q4_other'),
+    RaceEthnicity: checks('q5'), RaceEthnicityOther: text('q5_other'),
+    YearInSchool: radio('q6'), YearInSchoolOther: text('q6_other'),
+  };
+  for (let p = 1; p <= 4; p++) {    // score out of 8, or NA if that test wasn't run
+    out[`CBE_P${p}`] = S.cbeRun[p] ? `${S.cbeCorrect[p] || 0}/${CONFIG.CBE_PROBES}` : 'NA';
+    out[`FM_P${p}`] = S.fmRun[p] ? `${S.fmCorrect[p] || 0}/${CONFIG.FM_PROBES}` : 'NA';
+  }
+  return out;
+}
+
+async function submitSurvey() {
+  $('btn-submit-survey').disabled = true;
+  const status = $('save-status');
+  status.textContent = 'Saving your responses… please keep this page open.';
+  showScreen('screen-thanks');
+  window.scrollTo(0, 0);
+  const surveySave = trackedSave(`${fileStem()}_survey.csv`, toCSV(SURVEY_COLUMNS, [collectSurvey()]));
+  const [taskSaved, surveySaved] = await Promise.all([S.taskSave, surveySave]);
+  S.surveyDone = true;
+  $('code-line').textContent =
+    `Your participant code is ${S.pid}. If you contact the research team about your participation, please include this code.`;
+  const ok = taskSaved && surveySaved;
+  status.textContent = ok
+    ? `Your responses have been saved. ${CONFIG.creditInstructions}`
+    : `There was a problem saving your data. Please email ${CONFIG.contactEmail} to let us know, and include your participant code.`;
+  if (IS_TEST || !ok) showDownloads();
+}
+
+function showDownloads() {
+  const box = $('downloads');
+  box.innerHTML = '';
+  for (const [name, csv] of Object.entries(S.files)) {
+    const b = document.createElement('button');
+    b.textContent = 'Download ' + name.replace(fileStem() + '_', '');
+    b.addEventListener('click', () => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+      a.download = name; a.click();
+    });
+    box.appendChild(b);
+  }
+  box.style.display = 'flex';
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SETUP
+// ═══════════════════════════════════════════════════════════════
+document.querySelectorAll('.cfg-contact').forEach(el => { el.textContent = `${CONFIG.contactName} at ${CONFIG.contactEmail}`; });
+
+// Start building/preloading stimuli while the participant reads the consent sheet
+const stimReady = loadStimuli((done, total) => {
+  $('load-status').textContent = `Loading images… ${Math.round(100 * done / total)}%`;
+}).then(({ names, src }) => {
+  S.pool = names; S.src = src;
+}).catch(err => {
+  console.error(err);
+  // Researchers (test/debug links, or the file opened from your own computer) see the exact problem
+  const detail = (IS_TEST || location.protocol === 'file:') ? ` [Details for the researcher: ${err.message}]` : '';
+  $('load-status').textContent = 'The images could not be loaded. Please refresh the page; if this keeps happening, contact ' + CONFIG.contactEmail + '.' + detail;
+  throw err;
+});
+
+async function setupSession() {
+  S.pid = makeParticipantCode();
+  S.seed = hashSeed('H010|' + S.pid);
+  S.rng = makeRng(S.seed);
+  const d = new Date();
+  S.date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  S.time = `${pad(d.getHours())}.${pad(d.getMinutes())}.${pad(d.getSeconds())}`;
+  // Participants always get CONFIG.version; ?version=... only works on debug/test links
+  const v = (IS_TEST && params.get('version')) || CONFIG.version;
+  S.version = v === VERSION_ALL ? VERSION_ALL : v === 'random' ? (S.rng.random() < 0.5 ? VERSION_STOP : VERSION_ALL) : VERSION_STOP;
+
+  showScreen('screen-instructions');
+  await stimReady;
+  assignRoles();
+  buildSessionPlan();
+  $('load-status').textContent = '';
+  $('btn-start').disabled = false;
+  if (BOT != null) $('btn-start').click();
+}
+
+$('btn-start').addEventListener('click', () => {
+  showScreen('screen-task');
+  S.sessionStart = performance.now();
+  logRow({ event: 'SessionStarts', trial_type: `seed=${S.seed}` });
+  setTimeout(advance, 600);
+});
+
+document.querySelectorAll('input[name="consent"]').forEach(r =>
+  r.addEventListener('change', () => { $('btn-consent').disabled = false; }));
+$('btn-consent').addEventListener('click', () => {
+  const choice = document.querySelector('input[name="consent"]:checked');
+  if (!choice) return;
+  window.scrollTo(0, 0);
+  if (choice.value === 'agree') setupSession();
+  else showScreen('screen-declined');
+});
+$('btn-print').addEventListener('click', () => window.print());
+$('btn-to-survey').addEventListener('click', () => { showScreen('screen-survey'); window.scrollTo(0, 0); });
+$('btn-submit-survey').addEventListener('click', submitSurvey);
+
+document.querySelectorAll('#survey-form input.other').forEach(box => {
+  box.addEventListener('input', () => {
+    const choice = box.parentElement.querySelector('input[type=radio], input[type=checkbox]');
+    if (box.value.trim()) choice.checked = true;
+  });
+});
+
+// Log leaving / returning to the tab during the task
+document.addEventListener('visibilitychange', () => {
+  if (!S.sessionStart || S.finished) return;
+  logRow({ ...(S.base || {}), substage: '', event: document.hidden ? 'tab_hidden' : 'tab_visible' });
+});
+document.addEventListener('contextmenu', e => { if (S.sessionStart && !S.finished) e.preventDefault(); });
+
+// Phones and tablets (touch only) can't do this version
+if (('ontouchstart' in window) && !matchMedia('(any-pointer: fine)').matches) showScreen('screen-device');
+
+window.addEventListener('beforeunload', e => {
+  if ((S.sessionStart && !S.finished) || S.pendingUploads > 0) { e.preventDefault(); e.returnValue = ''; }
+});
+</script>
+</body>
+</html>
